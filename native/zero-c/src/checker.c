@@ -1157,6 +1157,14 @@ static bool expr_binding_path(const Expr *expr, char *root, size_t root_len, cha
     }
     return true;
   }
+  if (expr->kind == EXPR_INDEX) {
+    if (!expr_binding_path(expr->left, root, root_len, path, path_len)) return false;
+    size_t current_len = strlen(path);
+    size_t needed = current_len + strlen("[*]");
+    if (needed + 1 > path_len) return false;
+    snprintf(path + current_len, path_len - current_len, "[*]");
+    return true;
+  }
   return false;
 }
 
@@ -1184,11 +1192,16 @@ static bool expr_borrow_origins(const Expr *expr, Scope *scope, BorrowOrigins *o
   if (!expr || !origins) return false;
   if (expr->kind == EXPR_BORROW) {
     char root[128];
-    if (!expr_root_ident(expr->left, root, sizeof(root))) return false;
-    return borrow_origins_add(origins, root, scope_binding_scope(scope, root), expr->mutable_borrow, borrow_expr_origin_is_local_storage(expr->left, scope, root));
+    char path[256];
+    if (!expr_binding_path(expr->left, root, sizeof(root), path, sizeof(path))) return false;
+    return borrow_origins_add_full(origins, root, scope_binding_scope(scope, root), expr->mutable_borrow, borrow_expr_origin_is_local_storage(expr->left, scope, root), NULL, path);
   }
   if (expr->kind == EXPR_IDENT) {
-    return scope_copy_borrow_origins(scope, expr->text, origins);
+    if (scope_copy_borrow_origins(scope, expr->text, origins)) return true;
+    const char *actual = scope_type(scope, expr->text);
+    if (type_is_named_generic(actual, "ref") || type_is_named_generic(actual, "mutref")) {
+      return borrow_origins_add(origins, expr->text, scope_binding_scope(scope, expr->text), type_is_named_generic(actual, "mutref"), reference_source_origin_is_local_storage(scope, expr->text));
+    }
   }
   return false;
 }
@@ -4809,11 +4822,12 @@ static char *checked_call_param_type(const Program *program, const Function *cal
   return z_strdup(param_type ? param_type : "Unknown");
 }
 
+static bool function_return_borrow_origins(const Program *program, const Function *fun, BorrowOrigins *origins);
+
 static bool call_result_borrow_origins(const Program *program, const Expr *expr, Scope *scope, BorrowOrigins *origins) {
   if (!program || !expr || expr->kind != EXPR_CALL || !expr->left || !origins) return false;
   const char *return_type = expr_type(program, expr, scope);
   bool return_mut = type_is_named_generic(return_type, "mutref");
-  if (!return_mut && !type_is_named_generic(return_type, "ref")) return false;
 
   const Function *callee = NULL;
   const Expr *receiver = NULL;
@@ -4841,6 +4855,42 @@ static bool call_result_borrow_origins(const Program *program, const Expr *expr,
   if (!callee) return false;
 
   bool added = false;
+  BorrowOrigins summary = {0};
+  if (function_return_borrow_origins(program, callee, &summary)) {
+    for (size_t origin_index = 0; origin_index < summary.len; origin_index++) {
+      size_t param_index = callee->params.len;
+      for (size_t i = 0; i < callee->params.len; i++) {
+        if (callee->params.items[i].name && strcmp(callee->params.items[i].name, summary.roots[origin_index]) == 0) {
+          param_index = i;
+          break;
+        }
+      }
+      if (param_index >= callee->params.len) continue;
+      const Expr *actual = NULL;
+      if (receiver && param_offset == 1 && param_index == 0) {
+        actual = receiver;
+      } else if (param_index >= param_offset && param_index - param_offset < expr->args.len) {
+        actual = expr->args.items[param_index - param_offset];
+      }
+      if (!actual) continue;
+      BorrowOrigins actual_origins = {0};
+      if (expr_reference_origins_as(program, actual, scope, &actual_origins, summary.mutable_borrow[origin_index])) {
+        if (borrow_origins_add_all_as_with_prefix(origins, &actual_origins, summary.mutable_borrow[origin_index], summary.paths[origin_index])) added = true;
+      } else {
+        char root[128];
+        char path[256];
+        if (expr_binding_path(actual, root, sizeof(root), path, sizeof(path)) && scope_has(scope, root)) {
+          if (borrow_origins_add_full(origins, root, scope_binding_scope(scope, root), summary.mutable_borrow[origin_index], reference_source_origin_is_local_storage(scope, root), summary.paths[origin_index], path)) added = true;
+        }
+      }
+      borrow_origins_free(&actual_origins);
+    }
+  }
+  borrow_origins_free(&summary);
+  if (added) return true;
+
+  if (!return_mut && !type_is_named_generic(return_type, "ref")) return false;
+
   if (receiver && callee->params.len > 0) {
     char *param_type = checked_call_param_type(program, callee, expr, scope, return_type, 0);
     if (type_is_named_generic(param_type, "ref") || type_is_named_generic(param_type, "mutref")) {
@@ -4897,6 +4947,17 @@ static bool expr_reference_origins(const Program *program, const Expr *expr, Sco
     }
     return added;
   }
+  if (expr->kind == EXPR_ARRAY_LITERAL) {
+    bool added = false;
+    for (size_t i = 0; i < expr->args.len; i++) {
+      BorrowOrigins item_origins = {0};
+      if (expr_reference_origins(program, expr->args.items[i], scope, &item_origins)) {
+        if (borrow_origins_add_all_with_prefix(origins, &item_origins, "[*]")) added = true;
+      }
+      borrow_origins_free(&item_origins);
+    }
+    return added;
+  }
   return false;
 }
 
@@ -4944,6 +5005,93 @@ static bool update_borrow_assignment(const Program *program, const Expr *target,
   }
   borrow_origins_free(&origins);
   return true;
+}
+
+static size_t function_return_borrow_summary_depth = 0;
+
+static bool collect_return_borrow_origins_from_stmt_vec(const Program *program, const Function *fun, const StmtVec *body, Scope *scope, BorrowOrigins *out) {
+  if (!program || !fun || !body || !scope || !out) return false;
+  bool added = false;
+  for (size_t stmt_index = 0; stmt_index < body->len; stmt_index++) {
+    const Stmt *stmt = body->items[stmt_index];
+    if (!stmt) continue;
+    if (stmt->kind == STMT_LET) {
+      const char *binding_type = stmt->resolved_type ? stmt->resolved_type : stmt->type;
+      if (!binding_type && stmt->expr) binding_type = expr_type(program, stmt->expr, scope);
+      if (stmt->name) {
+        scope_add(scope, stmt->name, binding_type ? binding_type : "Unknown", stmt->mutable_binding);
+        register_borrow_binding(program, stmt, scope);
+      }
+      continue;
+    }
+    if (stmt->kind == STMT_ASSIGN) {
+      ZDiag ignored = {0};
+      if (!update_borrow_assignment(program, stmt->target, stmt->expr, scope, &ignored)) return added;
+      continue;
+    }
+    if (stmt->kind == STMT_RETURN) {
+      BorrowOrigins origins = {0};
+      if (expr_reference_origins(program, stmt->expr, scope, &origins)) {
+        if (borrow_origins_add_all(out, &origins)) added = true;
+      }
+      borrow_origins_free(&origins);
+      return added;
+    }
+    if (stmt->kind == STMT_IF) {
+      Scope then_scope = {.parent = scope};
+      if (collect_return_borrow_origins_from_stmt_vec(program, fun, &stmt->then_body, &then_scope, out)) added = true;
+      scope_free(&then_scope);
+      Scope else_scope = {.parent = scope};
+      if (collect_return_borrow_origins_from_stmt_vec(program, fun, &stmt->else_body, &else_scope, out)) added = true;
+      scope_free(&else_scope);
+      continue;
+    }
+    if (stmt->kind == STMT_WHILE) {
+      Scope body_scope = {.parent = scope};
+      if (collect_return_borrow_origins_from_stmt_vec(program, fun, &stmt->then_body, &body_scope, out)) added = true;
+      scope_free(&body_scope);
+      continue;
+    }
+    if (stmt->kind == STMT_FOR) {
+      Scope body_scope = {.parent = scope};
+      const char *iter_type = stmt->resolved_type ? stmt->resolved_type : (stmt->expr ? expr_type(program, stmt->expr, scope) : "Unknown");
+      if (stmt->name) scope_add(&body_scope, stmt->name, iter_type ? iter_type : "Unknown", false);
+      if (collect_return_borrow_origins_from_stmt_vec(program, fun, &stmt->then_body, &body_scope, out)) added = true;
+      scope_free(&body_scope);
+      continue;
+    }
+    if (stmt->kind == STMT_MATCH) {
+      const char *match_type = stmt->resolved_type ? stmt->resolved_type : (stmt->expr ? expr_type(program, stmt->expr, scope) : "Unknown");
+      const Choice *item_choice = find_choice(program, match_type);
+      for (size_t arm_index = 0; arm_index < stmt->match_arms.len; arm_index++) {
+        const MatchArm *arm = &stmt->match_arms.items[arm_index];
+        Scope arm_scope = {.parent = scope};
+        if (arm->payload_name && item_choice) {
+          const Param *item_case = find_case(&item_choice->cases, arm->case_name);
+          if (item_case && item_case->type) scope_add(&arm_scope, arm->payload_name, item_case->type, false);
+        }
+        if (collect_return_borrow_origins_from_stmt_vec(program, fun, &arm->body, &arm_scope, out)) added = true;
+        scope_free(&arm_scope);
+      }
+      continue;
+    }
+  }
+  return added;
+}
+
+static bool function_return_borrow_origins(const Program *program, const Function *fun, BorrowOrigins *origins) {
+  if (!program || !fun || !origins) return false;
+  if (function_return_borrow_summary_depth > 16) return false;
+  function_return_borrow_summary_depth++;
+  Scope scope = {0};
+  for (size_t param_index = 0; param_index < fun->params.len; param_index++) {
+    const Param *param = &fun->params.items[param_index];
+    if (param->name) scope_add_param(&scope, param->name, param->type);
+  }
+  bool added = collect_return_borrow_origins_from_stmt_vec(program, fun, &fun->body, &scope, origins);
+  scope_free(&scope);
+  function_return_borrow_summary_depth--;
+  return added;
 }
 
 static bool check_assignment_not_borrowed(const Expr *target, Scope *scope, ZDiag *diag) {
