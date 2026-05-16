@@ -4853,8 +4853,103 @@ static char *checked_call_param_type(const Program *program, const Function *cal
 
 static bool function_return_value_provenance(const Program *program, const Function *fun, ValueProvenance *origins);
 
+static bool type_value_provenance_from_place(
+  const Program *program,
+  const char *type,
+  Scope *scope,
+  const char *root,
+  const char *root_path,
+  const char *value_path,
+  ValueProvenance *origins,
+  size_t depth
+) {
+  if (!program || !type || !root || !origins || depth > 16) return false;
+  bool local_storage = reference_place_origin_is_local_storage(scope, root);
+  if (type_is_named_generic(type, "ref") || type_is_named_generic(type, "mutref")) {
+    return value_provenance_add_full(origins, root, scope_binding_scope(scope, root), type_is_named_generic(type, "mutref"), local_storage, value_path, root_path);
+  }
+  const char *inner = NULL;
+  size_t inner_len = 0;
+  if (type_has_generic_arg(type, "Maybe", &inner, &inner_len) ||
+      type_has_generic_arg(type, "owned", &inner, &inner_len)) {
+    char *inner_type = z_strndup(inner, inner_len);
+    const char *prefix = type_has_generic_arg(type, "Maybe", &inner, &inner_len) ? "value" : NULL;
+    char *next_value_path = origin_path_join(value_path, prefix);
+    char *next_root_path = origin_path_join(root_path, prefix);
+    bool added = type_value_provenance_from_place(program, inner_type, scope, root, next_root_path, next_value_path, origins, depth + 1);
+    free(next_value_path);
+    free(next_root_path);
+    free(inner_type);
+    return added;
+  }
+  char element_type[160];
+  if (fixed_array_type_parts(type, NULL, 0, element_type, sizeof(element_type))) {
+    char *next_value_path = origin_path_join(value_path, "[*]");
+    char *next_root_path = origin_path_join(root_path, "[*]");
+    bool added = type_value_provenance_from_place(program, element_type, scope, root, next_root_path, next_value_path, origins, depth + 1);
+    free(next_value_path);
+    free(next_root_path);
+    return added;
+  }
+  const Shape *shape = find_shape_for_type(program, type);
+  if (shape) {
+    bool added = false;
+    for (size_t i = 0; i < shape->fields.len; i++) {
+      const Param *field = &shape->fields.items[i];
+      if (!field->name || !field->type) continue;
+      char *field_type = shape_field_type_for_owner(shape, type, field);
+      char *next_value_path = origin_path_join(value_path, field->name);
+      char *next_root_path = origin_path_join(root_path, field->name);
+      if (type_value_provenance_from_place(program, field_type, scope, root, next_root_path, next_value_path, origins, depth + 1)) added = true;
+      free(next_value_path);
+      free(next_root_path);
+      free(field_type);
+    }
+    return added;
+  }
+  return false;
+}
+
+static bool maybe_unwrapped_value_provenance(ValueProvenance *out, const ValueProvenance *source) {
+  return value_provenance_add_all_under_path(out, source, "value");
+}
+
+static bool std_mem_get_value_provenance(const Program *program, const Expr *expr, Scope *scope, ValueProvenance *origins) {
+  if (!program || !expr || expr->kind != EXPR_CALL || !expr->left || expr->left->kind != EXPR_MEMBER || expr->args.len < 1) return false;
+  ZBuf callee_name;
+  zbuf_init(&callee_name);
+  member_name_buf(expr->left, &callee_name);
+  bool is_get = strcmp(callee_name.data, "std.mem.get") == 0;
+  zbuf_free(&callee_name);
+  if (!is_get) return false;
+
+  const Expr *collection = expr->args.items[0];
+  bool added = false;
+  ValueProvenance collection_provenance = {0};
+  if (expr_reference_provenance(program, collection, scope, &collection_provenance)) {
+    ValueProvenance element_provenance = {0};
+    if (value_provenance_add_all_under_path(&element_provenance, &collection_provenance, "[*]")) {
+      if (value_provenance_add_all_with_prefix(origins, &element_provenance, "value")) added = true;
+    }
+    value_provenance_free(&element_provenance);
+  }
+  value_provenance_free(&collection_provenance);
+  if (added) return true;
+
+  char root[128];
+  char path[256];
+  if (!expr_binding_path(collection, root, sizeof(root), path, sizeof(path)) || !scope_has(scope, root)) return false;
+  char element_type[160];
+  if (!index_element_type(expr_type(program, collection, scope), element_type, sizeof(element_type))) return false;
+  char *element_path = origin_path_join(path, "[*]");
+  added = type_value_provenance_from_place(program, element_type, scope, root, element_path, "value", origins, 0);
+  free(element_path);
+  return added;
+}
+
 static bool call_result_value_provenance(const Program *program, const Expr *expr, Scope *scope, ValueProvenance *origins) {
   if (!program || !expr || expr->kind != EXPR_CALL || !expr->left || !origins) return false;
+  if (std_mem_get_value_provenance(program, expr, scope, origins)) return true;
   const char *return_type = expr_type(program, expr, scope);
   bool return_mut = type_is_named_generic(return_type, "mutref");
 
@@ -4963,6 +5058,48 @@ static bool expr_reference_provenance(const Program *program, const Expr *expr, 
   if (!expr || !origins) return false;
   if (expr_value_provenance(expr, scope, origins) ||
       call_result_value_provenance(program, expr, scope, origins)) return true;
+  if (expr->kind == EXPR_IDENT) {
+    const char *actual = scope_type(scope, expr->text);
+    if (actual && type_value_provenance_from_place(program, actual, scope, expr->text, NULL, NULL, origins, 0)) return true;
+  }
+  if (expr->kind == EXPR_CHECK) {
+    ValueProvenance checked_provenance = {0};
+    bool added = false;
+    if (expr_reference_provenance(program, expr->left, scope, &checked_provenance)) {
+      const char *checked_type = expr_type(program, expr->left, scope);
+      const char *inner = NULL;
+      size_t inner_len = 0;
+      if (type_has_generic_arg(checked_type, "Maybe", &inner, &inner_len)) {
+        added = maybe_unwrapped_value_provenance(origins, &checked_provenance);
+      } else {
+        added = value_provenance_add_all(origins, &checked_provenance);
+      }
+    }
+    value_provenance_free(&checked_provenance);
+    return added;
+  }
+  if (expr->kind == EXPR_RESCUE) {
+    bool added = false;
+    ValueProvenance left_provenance = {0};
+    if (expr_reference_provenance(program, expr->left, scope, &left_provenance)) {
+      const char *left_type = expr_type(program, expr->left, scope);
+      const char *inner = NULL;
+      size_t inner_len = 0;
+      if (type_has_generic_arg(left_type, "Maybe", &inner, &inner_len)) {
+        if (maybe_unwrapped_value_provenance(origins, &left_provenance)) added = true;
+      } else if (value_provenance_add_all(origins, &left_provenance)) {
+        added = true;
+      }
+    }
+    value_provenance_free(&left_provenance);
+    ValueProvenance fallback_provenance = {0};
+    if (expr_reference_provenance(program, expr->right, scope, &fallback_provenance)) {
+      if (value_provenance_add_all(origins, &fallback_provenance)) added = true;
+    }
+    value_provenance_free(&fallback_provenance);
+    return added;
+  }
+  if (expr->kind == EXPR_CAST) return expr_reference_provenance(program, expr->left, scope, origins);
   if (expr->kind == EXPR_MEMBER) {
     char root[128];
     char path[256];
@@ -4974,9 +5111,7 @@ static bool expr_reference_provenance(const Program *program, const Expr *expr, 
       value_provenance_free(&binding_origins);
       if (added) return true;
       if (has_binding_origins) return false;
-      if (scope_has(scope, root) && (type_is_named_generic(member_type, "ref") || type_is_named_generic(member_type, "mutref"))) {
-        return value_provenance_add_full(origins, root, scope_binding_scope(scope, root), type_is_named_generic(member_type, "mutref"), reference_place_origin_is_local_storage(scope, root), NULL, path);
-      }
+      if (scope_has(scope, root) && type_value_provenance_from_place(program, member_type, scope, root, path, NULL, origins, 0)) return true;
     }
     if (type_is_named_generic(member_type, "ref") || type_is_named_generic(member_type, "mutref")) {
       ValueProvenance receiver_origins = {0};
@@ -4999,9 +5134,7 @@ static bool expr_reference_provenance(const Program *program, const Expr *expr, 
       value_provenance_free(&binding_origins);
       if (added) return true;
       if (has_binding_origins) return false;
-      if (scope_has(scope, root) && (type_is_named_generic(element_type, "ref") || type_is_named_generic(element_type, "mutref"))) {
-        return value_provenance_add_full(origins, root, scope_binding_scope(scope, root), type_is_named_generic(element_type, "mutref"), reference_place_origin_is_local_storage(scope, root), NULL, path);
-      }
+      if (scope_has(scope, root) && type_value_provenance_from_place(program, element_type, scope, root, path, NULL, origins, 0)) return true;
     }
     if (type_is_named_generic(element_type, "ref") || type_is_named_generic(element_type, "mutref")) {
       ValueProvenance receiver_origins = {0};
