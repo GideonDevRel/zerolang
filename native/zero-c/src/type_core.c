@@ -161,6 +161,12 @@ static bool ident_continue(char ch) {
   return isalnum((unsigned char)ch) || ch == '_';
 }
 
+static bool parser_keyword(TypeParser *parser, const char *keyword) {
+  size_t len = strlen(keyword);
+  return strncmp(parser->text + parser->cursor, keyword, len) == 0 &&
+         !ident_continue(parser->text[parser->cursor + len]);
+}
+
 static char *parser_ident(TypeParser *parser) {
   parser_skip_ws(parser);
   size_t start = parser->cursor;
@@ -322,8 +328,8 @@ static bool parse_type_arg(TypeParser *parser, ZTypeArena *arena, ZTypeArg *out)
   parser_skip_ws(parser);
   size_t start = parser->cursor;
   if (isdigit((unsigned char)parser->text[parser->cursor]) ||
-      strncmp(parser->text + parser->cursor, "true", 4) == 0 ||
-      strncmp(parser->text + parser->cursor, "false", 5) == 0) {
+      parser_keyword(parser, "true") ||
+      parser_keyword(parser, "false")) {
     ZStaticValue value = {0};
     while (parser->text[parser->cursor] && parser->text[parser->cursor] != ',' && parser->text[parser->cursor] != '>') parser->cursor++;
     char *text = trimmed_copy(parser->text + start, parser->cursor - start);
@@ -355,8 +361,7 @@ static bool parse_type_arg(TypeParser *parser, ZTypeArena *arena, ZTypeArg *out)
 
 static bool parse_type(TypeParser *parser, ZTypeArena *arena, ZTypeId *out) {
   parser_skip_ws(parser);
-  if (strncmp(parser->text + parser->cursor, "const", 5) == 0 &&
-      !ident_continue(parser->text[parser->cursor + 5])) {
+  if (parser_keyword(parser, "const")) {
     parser->cursor += 5;
     ZTypeId inner = Z_TYPE_ID_INVALID;
     if (!parse_type(parser, arena, &inner)) return false;

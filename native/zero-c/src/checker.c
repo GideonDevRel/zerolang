@@ -945,8 +945,9 @@ static bool set_diag_detail(
 }
 
 static ZDiag *check_context_diag(CheckContext *ctx, ZDiag *fallback) {
+  if (fallback) return fallback;
   if (ctx && ctx->diags && ctx->diags->diag) return ctx->diags->diag;
-  return fallback;
+  return NULL;
 }
 
 static bool is_builtin_value(const char *name) {

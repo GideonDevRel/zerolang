@@ -130,6 +130,7 @@ int main(void) {
   expect_roundtrip("Span<u8>", "Span<u8>");
   expect_roundtrip("MutSpan<Span<u8>>", "MutSpan<Span<u8>>");
   expect_roundtrip("Maybe<owned<ByteBuf>>", "Maybe<owned<ByteBuf>>");
+  expect_roundtrip("Box<trueThing<u8>>", "Box<trueThing<u8>>");
   expect_roundtrip("ref<FixedVec<u8, 4>>", "ref<FixedVec<u8,4>>");
   expect_roundtrip("mutref<MutSpan<u8>>", "mutref<MutSpan<u8>>");
   expect_roundtrip("FixedVec<T,N>", "FixedVec<T,N>");
