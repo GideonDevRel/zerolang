@@ -462,6 +462,7 @@ assert.deepEqual(agentSurfaceClassification.fixtures.map((item) => item.id), [
   "direct-generic-recursion",
   "polymorphic-recursion-growth",
   "mutual-polymorphic-recursion-growth",
+  "mutual-polymorphic-recursion-inferred-growth",
   "stdlib-signature-parity",
   "borrow-lexical-lifetime",
   "unresolved-package-import",
@@ -522,6 +523,12 @@ assert.notEqual(agentSurfaceMutualPolymorphicRecursion.code, 0);
 const agentSurfaceMutualPolymorphicRecursionBody = JSON.parse(agentSurfaceMutualPolymorphicRecursion.stdout);
 assert.equal(agentSurfaceMutualPolymorphicRecursionBody.diagnostics[0].code, "TYP027");
 assert.match(agentSurfaceMutualPolymorphicRecursionBody.diagnostics[0].message, /recursive generic call/);
+
+const agentSurfaceMutualInferredPolymorphicRecursion = await execFileAsync(zero, ["check", "--json", "conformance/agent-surface/fixtures/mutual-polymorphic-recursion-inferred-growth.0"]).catch((error) => error);
+assert.notEqual(agentSurfaceMutualInferredPolymorphicRecursion.code, 0);
+const agentSurfaceMutualInferredPolymorphicRecursionBody = JSON.parse(agentSurfaceMutualInferredPolymorphicRecursion.stdout);
+assert.equal(agentSurfaceMutualInferredPolymorphicRecursionBody.diagnostics[0].code, "TYP027");
+assert.match(agentSurfaceMutualInferredPolymorphicRecursionBody.diagnostics[0].message, /recursive generic call/);
 
 const compilerMetrics = await execFileAsync("node", ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", "scripts/compiler-metrics.mts"]);
 const compilerMetricsBody = JSON.parse(compilerMetrics.stdout);
@@ -847,6 +854,20 @@ assert.equal(directI64ObjBody.generatedCBytes, 0);
 assert.equal(directI64ObjBody.objectBackend.objectEmission.path, "direct-elf64-object");
 assert(directI64ObjBytes.includes(Buffer.from([0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f])));
 assert(directI64ObjBytes.includes(Buffer.from([0x48, 0x01, 0xc8])));
+
+const directMachOU64LiteralSource = `${outDir}/direct-macho-u64-literal.0`;
+const directMachOU64LiteralOut = `${outDir}/direct-macho-u64-literal.o`;
+await writeFile(directMachOU64LiteralSource, `export c fun main() -> u64 {
+    let value: u64 = 4294967296
+    return value
+}
+`);
+const directMachOU64LiteralJson = await execFileAsync(zero, ["build", "--json", "--emit", "obj", "--target", "darwin-arm64", directMachOU64LiteralSource, "--out", directMachOU64LiteralOut]);
+const directMachOU64LiteralBody = JSON.parse(directMachOU64LiteralJson.stdout);
+const directMachOU64LiteralBytes = await readFile(directMachOU64LiteralOut);
+assert.equal(directMachOU64LiteralBody.compiler, "zero-macho64");
+assert.equal(directMachOU64LiteralBody.objectBackend.objectEmission.path, "direct-macho64-object");
+assert(directMachOU64LiteralBytes.includes(Buffer.from([0x28, 0x00, 0xc0, 0xf2])));
 
 const directMachOU64DivSource = `${outDir}/direct-macho-u64-div.0`;
 const directMachOU64DivOut = `${outDir}/direct-macho-u64-div.o`;

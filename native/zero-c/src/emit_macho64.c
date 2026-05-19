@@ -1065,7 +1065,7 @@ static bool macho_emit_value_to_reg_at(ZBuf *text, const IrFunction *fun, const 
   switch (value->kind) {
     case IR_VALUE_BOOL:
     case IR_VALUE_INT:
-      if (macho_type_is_scalar64(value->type)) macho_emit_movz_x(text, reg, (uint32_t)value->int_value);
+      if (macho_type_is_scalar64(value->type)) macho_emit_movz_x(text, reg, (uint64_t)value->int_value);
       else macho_emit_movz_w(text, reg, (uint32_t)value->int_value);
       return true;
     case IR_VALUE_LOCAL:
@@ -1504,7 +1504,7 @@ static bool macho_emit_instr(ZBuf *text, const IrFunction *fun, const IrInstr *i
       if (instr->value->kind == IR_VALUE_MAYBE_SCALAR_LITERAL) {
         macho_emit_movz_w(text, 8, instr->value->data_len ? 1u : 0u);
         macho_emit_store_local_w(text, fun, 8, instr->local_index, 0, frame_size);
-        macho_emit_movz_x(text, 8, (uint32_t)instr->value->int_value);
+        macho_emit_movz_x(text, 8, (uint64_t)instr->value->int_value);
         macho_emit_store_local_x(text, fun, 8, instr->local_index, 8, frame_size);
         return true;
       }

@@ -91,6 +91,14 @@
       "runner": "assert-diagnostic-code"
     },
     {
+      "id": "mutual-polymorphic-recursion-inferred-growth",
+      "path": "conformance/agent-surface/fixtures/mutual-polymorphic-recursion-inferred-growth.0",
+      "classification": "unsupported-language-feature",
+      "currentBehavior": "check-fail-TYP027",
+      "followUp": "Keep inferred mutually recursive growing generic instantiations bounded unless the type system grows full polymorphic recursion support.",
+      "runner": "assert-diagnostic-code"
+    },
+    {
       "id": "stdlib-signature-parity",
       "path": "scripts/compiler-metrics.mts",
       "classification": "metadata-drift-risk",
