@@ -3,6 +3,12 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": [
+        "NEXT_ASSET_PREFIX",
+        "NEXT_BASE_PATH",
+        "NEXT_PUBLIC_GITHUB_REPO",
+        "NEXT_PUBLIC_SITE_URL"
+      ],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**", "!.next/dev/**"]
     },
     "dev": {
