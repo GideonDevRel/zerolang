@@ -224,11 +224,31 @@ static char *trimmed_copy(const char *text, size_t len) {
   return type_strndup(text, len);
 }
 
+static bool integer_suffix_text(const char *text) {
+  static const char *suffixes[] = {
+    "i8", "i16", "i32", "i64", "isize",
+    "u8", "u16", "u32", "u64", "usize",
+    NULL,
+  };
+  for (size_t i = 0; suffixes[i]; i++) {
+    if (strcmp(text, suffixes[i]) == 0) return true;
+  }
+  return false;
+}
+
 static bool parse_number_text(const char *text, unsigned long long *out) {
   if (!text || !text[0]) return false;
   size_t body_len = strlen(text);
   const char *last_underscore = strrchr(text, '_');
-  if (last_underscore && isalpha((unsigned char)last_underscore[1])) body_len = (size_t)(last_underscore - text);
+  if (last_underscore) {
+    const char *candidate = last_underscore + 1;
+    if (candidate[0] == 0) return false;
+    if (integer_suffix_text(candidate)) {
+      body_len = (size_t)(last_underscore - text);
+    } else if (candidate[0] == 'i' || candidate[0] == 'u') {
+      return false;
+    }
+  }
   if (body_len == 0) return false;
   unsigned base = 10;
   size_t index = 0;
@@ -244,9 +264,14 @@ static bool parse_number_text(const char *text, unsigned long long *out) {
   }
   unsigned long long value = 0;
   bool saw_digit = false;
+  bool previous_underscore = false;
   for (; index < body_len; index++) {
     char ch = text[index];
-    if (ch == '_') continue;
+    if (ch == '_') {
+      if (!saw_digit || previous_underscore) return false;
+      previous_underscore = true;
+      continue;
+    }
     int digit = -1;
     if (ch >= '0' && ch <= '9') digit = ch - '0';
     else if (ch >= 'a' && ch <= 'f') digit = 10 + ch - 'a';
@@ -255,8 +280,9 @@ static bool parse_number_text(const char *text, unsigned long long *out) {
     if (value > (ULLONG_MAX - (unsigned)digit) / base) return false;
     value = value * base + (unsigned)digit;
     saw_digit = true;
+    previous_underscore = false;
   }
-  if (!saw_digit) return false;
+  if (!saw_digit || previous_underscore) return false;
   if (out) *out = value;
   return true;
 }

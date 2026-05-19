@@ -139,6 +139,7 @@ int main(void) {
   expect_roundtrip("const [4]Maybe<ref<Point>>", "const [4]Maybe<ref<Point>>");
 
   expect_static_roundtrip("42", "42", Z_STATIC_VALUE_NUMBER);
+  expect_static_roundtrip("4_096", "4096", Z_STATIC_VALUE_NUMBER);
   expect_static_roundtrip("0b1010", "10", Z_STATIC_VALUE_NUMBER);
   expect_static_roundtrip("true", "true", Z_STATIC_VALUE_BOOL);
   expect_static_roundtrip("Mode.tiny", "Mode.tiny", Z_STATIC_VALUE_SYMBOL);
@@ -159,10 +160,18 @@ int main(void) {
   expect_invalid_type("[]u8");
   expect_invalid_type("const");
   expect_invalid_type("FixedVec<u8,>");
+  expect_invalid_type("[4_]u8");
+  expect_invalid_type("[4__5]u8");
+  expect_invalid_type("[0x_1]u8");
+  expect_invalid_type("FixedVec<u8,4_nope>");
 
   expect_invalid_static("");
   expect_invalid_static("Mode.");
   expect_invalid_static("0x");
+  expect_invalid_static("4_");
+  expect_invalid_static("4__5");
+  expect_invalid_static("0x_1");
+  expect_invalid_static("4_nope");
 
   printf("type core smoke ok\n");
   return 0;
