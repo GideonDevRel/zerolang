@@ -461,6 +461,7 @@ assert.deepEqual(agentSurfaceClassification.fixtures.map((item) => item.id), [
   "interface-method-generic-binding",
   "direct-generic-recursion",
   "polymorphic-recursion-growth",
+  "mutual-polymorphic-recursion-growth",
   "stdlib-signature-parity",
   "borrow-lexical-lifetime",
   "unresolved-package-import",
@@ -515,6 +516,12 @@ assert.notEqual(agentSurfacePolymorphicRecursion.code, 0);
 const agentSurfacePolymorphicRecursionBody = JSON.parse(agentSurfacePolymorphicRecursion.stdout);
 assert.equal(agentSurfacePolymorphicRecursionBody.diagnostics[0].code, "TYP027");
 assert.match(agentSurfacePolymorphicRecursionBody.diagnostics[0].message, /recursive generic call/);
+
+const agentSurfaceMutualPolymorphicRecursion = await execFileAsync(zero, ["check", "--json", "conformance/agent-surface/fixtures/mutual-polymorphic-recursion-growth.0"]).catch((error) => error);
+assert.notEqual(agentSurfaceMutualPolymorphicRecursion.code, 0);
+const agentSurfaceMutualPolymorphicRecursionBody = JSON.parse(agentSurfaceMutualPolymorphicRecursion.stdout);
+assert.equal(agentSurfaceMutualPolymorphicRecursionBody.diagnostics[0].code, "TYP027");
+assert.match(agentSurfaceMutualPolymorphicRecursionBody.diagnostics[0].message, /recursive generic call/);
 
 const compilerMetrics = await execFileAsync("node", ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", "scripts/compiler-metrics.mts"]);
 const compilerMetricsBody = JSON.parse(compilerMetrics.stdout);
@@ -840,6 +847,36 @@ assert.equal(directI64ObjBody.generatedCBytes, 0);
 assert.equal(directI64ObjBody.objectBackend.objectEmission.path, "direct-elf64-object");
 assert(directI64ObjBytes.includes(Buffer.from([0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f])));
 assert(directI64ObjBytes.includes(Buffer.from([0x48, 0x01, 0xc8])));
+
+const directMachOU64DivSource = `${outDir}/direct-macho-u64-div.0`;
+const directMachOU64DivOut = `${outDir}/direct-macho-u64-div.o`;
+await writeFile(directMachOU64DivSource, `export c fun main(a: u64, b: u64) -> u64 {
+    return a / b
+}
+`);
+const directMachOU64DivJson = await execFileAsync(zero, ["build", "--json", "--emit", "obj", "--target", "darwin-arm64", directMachOU64DivSource, "--out", directMachOU64DivOut]);
+const directMachOU64DivBody = JSON.parse(directMachOU64DivJson.stdout);
+const directMachOU64DivBytes = await readFile(directMachOU64DivOut);
+assert.equal(directMachOU64DivBody.compiler, "zero-macho64");
+assert.equal(directMachOU64DivBody.objectBackend.objectEmission.path, "direct-macho64-object");
+assert(directMachOU64DivBytes.includes(Buffer.from([0x00, 0x09, 0xc9, 0x9a])));
+assert(!directMachOU64DivBytes.includes(Buffer.from([0x00, 0x09, 0xc9, 0x1a])));
+
+const directMachOU64ModSource = `${outDir}/direct-macho-u64-mod.0`;
+const directMachOU64ModOut = `${outDir}/direct-macho-u64-mod.o`;
+await writeFile(directMachOU64ModSource, `export c fun main(a: u64, b: u64) -> u64 {
+    return a % b
+}
+`);
+const directMachOU64ModJson = await execFileAsync(zero, ["build", "--json", "--emit", "obj", "--target", "darwin-arm64", directMachOU64ModSource, "--out", directMachOU64ModOut]);
+const directMachOU64ModBody = JSON.parse(directMachOU64ModJson.stdout);
+const directMachOU64ModBytes = await readFile(directMachOU64ModOut);
+assert.equal(directMachOU64ModBody.compiler, "zero-macho64");
+assert.equal(directMachOU64ModBody.objectBackend.objectEmission.path, "direct-macho64-object");
+assert(directMachOU64ModBytes.includes(Buffer.from([0x0a, 0x09, 0xc9, 0x9a])));
+assert(directMachOU64ModBytes.includes(Buffer.from([0x40, 0xa1, 0x09, 0x9b])));
+assert(!directMachOU64ModBytes.includes(Buffer.from([0x0a, 0x09, 0xc9, 0x1a])));
+assert(!directMachOU64ModBytes.includes(Buffer.from([0x40, 0xa1, 0x09, 0x1b])));
 
 const metaJsonSuccess = await execFileAsync(zero, ["check", "--json", "conformance/native/pass/meta-typed-target-type.0"]);
 const metaJsonSuccessBody = JSON.parse(metaJsonSuccess.stdout);

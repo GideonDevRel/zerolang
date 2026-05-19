@@ -1906,6 +1906,8 @@ static bool type_is_generic_param(const Function *fun, const char *type) {
   return false;
 }
 
+static char *type_substitute_generic(const char *type, GenericBinding *bindings, size_t binding_len);
+
 static bool type_text_references_name(const char *type, const char *name) {
   if (!type || !name || !name[0]) return false;
   size_t name_len = strlen(name);
@@ -1928,19 +1930,105 @@ static bool type_references_function_generic_param(const Function *fun, const ch
   return false;
 }
 
-static bool validate_recursive_generic_call_bindings(const Function *fun, const Expr *call, ZDiag *diag, GenericBinding *bindings, size_t binding_len) {
-  if (!checking_function || !function_is_generic(checking_function) || !function_is_generic(fun) || !call) return true;
-  if (checking_function != fun && (!checking_function->name || !fun->name || strcmp(checking_function->name, fun->name) != 0)) return true;
-  for (size_t i = 0; i < fun->type_params.len && i < binding_len; i++) {
-    const Param *param = &fun->type_params.items[i];
+static bool function_names_match(const Function *left, const Function *right) {
+  if (left == right) return true;
+  return left && right && left->name && right->name && strcmp(left->name, right->name) == 0;
+}
+
+static bool recursive_generic_bindings_reference_origin(const Function *origin, GenericBinding *bindings, size_t binding_len) {
+  if (!origin || !function_is_generic(origin)) return false;
+  for (size_t i = 0; i < binding_len; i++) {
+    if (type_references_function_generic_param(origin, bindings[i].type)) return true;
+  }
+  return false;
+}
+
+static bool recursive_generic_bindings_keep_origin_stable(const Function *origin, const Expr *call, ZDiag *diag, GenericBinding *bindings, size_t binding_len) {
+  if (!origin || !function_is_generic(origin)) return true;
+  for (size_t i = 0; i < origin->type_params.len && i < binding_len; i++) {
+    const Param *param = &origin->type_params.items[i];
     if (param->is_static) continue;
     const char *bound = generic_binding_lookup(bindings, binding_len, param->name);
-    if (!type_references_function_generic_param(checking_function, bound)) continue;
-    const char *same_param = i < checking_function->type_params.len ? checking_function->type_params.items[i].name : NULL;
-    if (same_param && strcmp(bound, same_param) == 0) continue;
+    if (!type_references_function_generic_param(origin, bound)) continue;
+    if (strcmp(bound, param->name) == 0) continue;
     return set_diag_detail(diag, 3050, "recursive generic call changes type arguments", call->line, call->column, "recursive call with unchanged generic type parameters", bound ? bound : "Unknown", "call recursively with the current type parameters or use a concrete helper");
   }
   return true;
+}
+
+static bool recursive_generic_call_bindings_for_context(const Function *callee, const Expr *call, GenericBinding *context_bindings, size_t context_binding_len, GenericBinding **out_bindings, size_t *out_len) {
+  if (!callee || !call || !out_bindings || !out_len) return false;
+  const TypeArgVec *type_args = call_type_args(call);
+  if (!type_args || type_args->len != callee->type_params.len) return false;
+  GenericBinding *bindings = z_checked_calloc(callee->type_params.len ? callee->type_params.len : 1, sizeof(GenericBinding));
+  for (size_t i = 0; i < callee->type_params.len; i++) {
+    bindings[i].name = callee->type_params.items[i].name;
+    bindings[i].type = type_substitute_generic(type_args->items[i].type, context_bindings, context_binding_len);
+  }
+  *out_bindings = bindings;
+  *out_len = callee->type_params.len;
+  return true;
+}
+
+static bool validate_recursive_generic_cycle_in_expr(const Program *program, const Function *origin, const Expr *expr, GenericBinding *context_bindings, size_t context_binding_len, ZDiag *diag, size_t depth, size_t depth_limit);
+
+static bool validate_recursive_generic_cycle_in_stmt_vec(const Program *program, const Function *origin, const StmtVec *body, GenericBinding *context_bindings, size_t context_binding_len, ZDiag *diag, size_t depth, size_t depth_limit) {
+  if (!body || depth > depth_limit) return true;
+  for (size_t i = 0; i < body->len; i++) {
+    const Stmt *stmt = body->items[i];
+    if (!stmt) continue;
+    if (!validate_recursive_generic_cycle_in_expr(program, origin, stmt->target, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+    if (!validate_recursive_generic_cycle_in_expr(program, origin, stmt->expr, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+    if (!validate_recursive_generic_cycle_in_expr(program, origin, stmt->range_end, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+    if (!validate_recursive_generic_cycle_in_stmt_vec(program, origin, &stmt->then_body, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+    if (!validate_recursive_generic_cycle_in_stmt_vec(program, origin, &stmt->else_body, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+    for (size_t arm_index = 0; arm_index < stmt->match_arms.len; arm_index++) {
+      if (!validate_recursive_generic_cycle_in_expr(program, origin, stmt->match_arms.items[arm_index].guard, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+      if (!validate_recursive_generic_cycle_in_stmt_vec(program, origin, &stmt->match_arms.items[arm_index].body, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+    }
+  }
+  return true;
+}
+
+static bool validate_recursive_generic_cycle_in_expr(const Program *program, const Function *origin, const Expr *expr, GenericBinding *context_bindings, size_t context_binding_len, ZDiag *diag, size_t depth, size_t depth_limit) {
+  if (!expr || !program || !origin || depth > depth_limit) return true;
+  if (expr->kind == EXPR_CALL && expr->left && expr->left->kind == EXPR_IDENT) {
+    const Function *callee = find_function(program, expr->left->text);
+    if (function_is_generic(callee)) {
+      GenericBinding *next_bindings = NULL;
+      size_t next_binding_len = 0;
+      if (recursive_generic_call_bindings_for_context(callee, expr, context_bindings, context_binding_len, &next_bindings, &next_binding_len)) {
+        bool ok = true;
+        if (function_names_match(callee, origin)) {
+          ok = recursive_generic_bindings_keep_origin_stable(origin, expr, diag, next_bindings, next_binding_len);
+        } else if (recursive_generic_bindings_reference_origin(origin, next_bindings, next_binding_len)) {
+          ok = validate_recursive_generic_cycle_in_stmt_vec(program, origin, &callee->body, next_bindings, next_binding_len, diag, depth + 1, depth_limit);
+        }
+        generic_bindings_free(next_bindings, next_binding_len);
+        free(next_bindings);
+        if (!ok) return false;
+      }
+    }
+  }
+  if (!validate_recursive_generic_cycle_in_expr(program, origin, expr->left, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+  if (!validate_recursive_generic_cycle_in_expr(program, origin, expr->right, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+  for (size_t i = 0; i < expr->args.len; i++) {
+    if (!validate_recursive_generic_cycle_in_expr(program, origin, expr->args.items[i], context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+  }
+  for (size_t i = 0; i < expr->fields.len; i++) {
+    if (!validate_recursive_generic_cycle_in_expr(program, origin, expr->fields.items[i].value, context_bindings, context_binding_len, diag, depth, depth_limit)) return false;
+  }
+  return true;
+}
+
+static bool validate_recursive_generic_call_bindings(const Program *program, const Function *fun, const Expr *call, ZDiag *diag, GenericBinding *bindings, size_t binding_len) {
+  if (!checking_function || !function_is_generic(checking_function) || !function_is_generic(fun) || !call) return true;
+  if (function_names_match(checking_function, fun)) {
+    return recursive_generic_bindings_keep_origin_stable(checking_function, call, diag, bindings, binding_len);
+  }
+  if (!program || !recursive_generic_bindings_reference_origin(checking_function, bindings, binding_len)) return true;
+  size_t depth_limit = program->functions.len + 1;
+  return validate_recursive_generic_cycle_in_stmt_vec(program, checking_function, &fun->body, bindings, binding_len, diag, 1, depth_limit);
 }
 
 static bool is_static_int_param_type(const char *type) {
@@ -4755,7 +4843,7 @@ static bool check_expr_expected(const Program *program, const Expr *expr, Scope 
             free(bindings);
             return false;
           }
-          if (!validate_recursive_generic_call_bindings(fun, expr, diag, bindings, fun->type_params.len)) {
+          if (!validate_recursive_generic_call_bindings(program, fun, expr, diag, bindings, fun->type_params.len)) {
             generic_bindings_free(bindings, fun->type_params.len);
             free(bindings);
             return false;

@@ -2777,7 +2777,7 @@ static const ExplainInfo explain_infos[] = {
     "TYP027",
     "type",
     "Recursive generic call changes type arguments",
-    "A recursive generic function call instantiated itself with a type argument that still references the current generic parameter.",
+    "A recursive generic function call or call cycle instantiated itself with a type argument that still references the current generic parameter.",
     "Zero monomorphizes generic calls directly, so growing recursive instantiations such as Maybe<T>, Maybe<Maybe<T>>, and deeper forms are rejected instead of expanding without a bound.",
     "Call recursively with the same generic type parameters or move the growing case into a concrete helper.",
     "grow<Maybe<T>>(nested)",
