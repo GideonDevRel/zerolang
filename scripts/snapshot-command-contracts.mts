@@ -369,6 +369,26 @@ assert(rowGraph.sourceFiles.includes(rowCommandFixture));
 assert(rowGraph.symbols.some((symbol) => symbol.name === "inc" && symbol.kind === "function"));
 assert(rowGraph.functions.some((fun) => fun.name === "main"));
 
+const rowMetadataFixture = join(outDir, "row_metadata.row");
+const rowMetadataSource =
+  "pub enum Mode\n" +
+  "  auto\n" +
+  "  manual\n" +
+  "pub choice Result\n" +
+  "  ok i32\n" +
+  "  err String\n" +
+  "test \"metadata\"\n" +
+  "  let total i32 + 1 1\n" +
+  "pub fn main Void\n";
+writeFileSync(rowMetadataFixture, rowMetadataSource);
+const rowMetadataGraph = json(["graph", "--json", rowMetadataFixture]).body;
+assert(rowMetadataGraph.symbols.some((symbol) => symbol.name === "Mode" && symbol.kind === "enum" && symbol.public === true));
+assert(rowMetadataGraph.symbols.some((symbol) => symbol.name === "Result" && symbol.kind === "choice" && symbol.public === true));
+assert(!rowMetadataGraph.symbols.some((symbol) => symbol.name.startsWith("__zero_test_")));
+const rowMetadataDoc = json(["doc", "--json", rowMetadataFixture]).body;
+assert(rowMetadataDoc.symbols.some((symbol) => symbol.name === "Mode" && symbol.kind === "enum"));
+assert(rowMetadataDoc.symbols.some((symbol) => symbol.name === "Result" && symbol.kind === "choice"));
+
 const testJson = json(["test", "--json", "--filter", "addition", "conformance/native/pass/test-blocks.0"]).body;
 assert.equal(testJson.schemaVersion, 1);
 assert.equal(testJson.ok, true);

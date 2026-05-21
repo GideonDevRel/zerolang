@@ -3707,24 +3707,6 @@ static bool load_direct_row_source(const char *path, SourceInput *input, ZDiag *
   return true;
 }
 
-static bool parse_row_source_text(const char *source, Program *program, ZDiag *diag) {
-  ZRowTokenVec tokens = z_row_tokenize(source, diag);
-  if (diag->code != 0) {
-    z_free_row_tokens(&tokens);
-    return false;
-  }
-  ZRowTree tree = {0};
-  if (!z_row_parse_layout(&tokens, &tree, diag)) {
-    z_free_row_tree(&tree);
-    z_free_row_tokens(&tokens);
-    return false;
-  }
-  *program = z_parse_row(&tokens, &tree, diag);
-  z_free_row_tree(&tree);
-  z_free_row_tokens(&tokens);
-  return diag->code == 0;
-}
-
 static char *format_row_source_text(const char *source, ZDiag *diag) {
   ZRowTokenVec tokens = z_row_tokenize(source, diag);
   if (diag->code != 0) {
@@ -3754,29 +3736,65 @@ static void direct_input_push_symbol(SourceInput *input, const char *module, con
   input->symbol_public[input->symbol_count++] = is_public;
 }
 
-static void direct_input_add_program_symbols(SourceInput *input, const Program *program) {
+static bool direct_row_token_text(const ZRowTokenVec *tokens, size_t index, const char *text) {
+  return tokens && index < tokens->len && tokens->items[index].text && strcmp(tokens->items[index].text, text) == 0;
+}
+
+static const char *direct_row_symbol_kind(const ZRowTokenVec *tokens, size_t index) {
+  if (direct_row_token_text(tokens, index, "const")) return "const";
+  if (direct_row_token_text(tokens, index, "fn")) return "function";
+  if (direct_row_token_text(tokens, index, "type")) return "shape";
+  if (direct_row_token_text(tokens, index, "enum")) return "enum";
+  if (direct_row_token_text(tokens, index, "choice")) return "choice";
+  return NULL;
+}
+
+static void direct_input_add_row_symbols(SourceInput *input, const ZRowTokenVec *tokens, const ZRowTree *tree) {
   const char *module = input && input->module_count > 0 ? input->module_names[0] : "main";
-  for (size_t i = 0; program && i < program->consts.len; i++) {
-    direct_input_push_symbol(input, module, "const", program->consts.items[i].name, program->consts.items[i].is_public);
+  for (size_t i = 0; input && tokens && tree && i < tree->len; i++) {
+    const ZRowNode *node = &tree->items[i];
+    if (node->parent != Z_ROW_NO_PARENT) continue;
+    size_t pos = node->first_token;
+    size_t end = node->first_token + node->token_count;
+    bool is_public = false;
+    if (direct_row_token_text(tokens, pos, "pub")) {
+      is_public = true;
+      pos++;
+    }
+    if (direct_row_token_text(tokens, pos, "export")) {
+      pos++;
+      if (direct_row_token_text(tokens, pos, "c")) pos++;
+    }
+    if (direct_row_token_text(tokens, pos, "test")) continue;
+    const char *kind = direct_row_symbol_kind(tokens, pos);
+    if (!kind) continue;
+    size_t name_index = pos + 1;
+    if (name_index >= end || tokens->items[name_index].kind != Z_ROW_TOKEN_WORD) continue;
+    direct_input_push_symbol(input, module, kind, tokens->items[name_index].text, is_public);
   }
-  for (size_t i = 0; program && i < program->aliases.len; i++) {
-    direct_input_push_symbol(input, module, "alias", program->aliases.items[i].name, program->aliases.items[i].is_public);
+}
+
+static bool parse_row_source_text_ex(const char *source, Program *program, ZDiag *diag, SourceInput *input) {
+  ZRowTokenVec tokens = z_row_tokenize(source, diag);
+  if (diag->code != 0) {
+    z_free_row_tokens(&tokens);
+    return false;
   }
-  for (size_t i = 0; program && i < program->interfaces.len; i++) {
-    direct_input_push_symbol(input, module, "interface", program->interfaces.items[i].name, program->interfaces.items[i].is_public);
+  ZRowTree tree = {0};
+  if (!z_row_parse_layout(&tokens, &tree, diag)) {
+    z_free_row_tree(&tree);
+    z_free_row_tokens(&tokens);
+    return false;
   }
-  for (size_t i = 0; program && i < program->shapes.len; i++) {
-    direct_input_push_symbol(input, module, "shape", program->shapes.items[i].name, program->shapes.items[i].is_public);
-  }
-  for (size_t i = 0; program && i < program->enums.len; i++) {
-    direct_input_push_symbol(input, module, "enum", program->enums.items[i].name, false);
-  }
-  for (size_t i = 0; program && i < program->choices.len; i++) {
-    direct_input_push_symbol(input, module, "choice", program->choices.items[i].name, false);
-  }
-  for (size_t i = 0; program && i < program->functions.len; i++) {
-    direct_input_push_symbol(input, module, "function", program->functions.items[i].name, program->functions.items[i].is_public);
-  }
+  *program = z_parse_row(&tokens, &tree, diag);
+  if (diag->code == 0 && input) direct_input_add_row_symbols(input, &tokens, &tree);
+  z_free_row_tree(&tree);
+  z_free_row_tokens(&tokens);
+  return diag->code == 0;
+}
+
+static bool parse_row_source_text(const char *source, Program *program, ZDiag *diag) {
+  return parse_row_source_text_ex(source, program, diag, NULL);
 }
 
 static bool compile_input(const char *input_path, const ZTargetInfo *target, SourceInput *input, Program *program, ZDiag *diag) {
@@ -3786,12 +3804,11 @@ static bool compile_input(const char *input_path, const ZTargetInfo *target, Sou
     input->resolve_ms = now_ms() - phase_started;
     diag->path = input->source_file;
     phase_started = now_ms();
-    if (!parse_row_source_text(input->source, program, diag)) {
+    if (!parse_row_source_text_ex(input->source, program, diag, input)) {
       z_map_source_diag(input, diag);
       return false;
     }
     input->parse_ms = now_ms() - phase_started;
-    direct_input_add_program_symbols(input, program);
     input->interface_ms = input->resolve_ms;
     input->parse_cache_hit = compiler_cache_touch("parse-tree", compile_cache_key(input, NULL, NULL, "parse-tree"));
     input->interface_cache_hit = compiler_cache_touch("interface", source_interface_hash(input));
