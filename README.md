@@ -13,8 +13,6 @@ Optimized for:
 - Low runtime latency
 - Zero dependencies
 
-For 
-
 > **Safety status**
 >
 > Security vulnerabilities should be expected. zerolang is not ready for production systems, sensitive data, or trusted infrastructure. Run and develop it in isolated, disposable environments.
