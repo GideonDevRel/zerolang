@@ -1,13 +1,65 @@
 pub fn main Void world World !
   mut path_buf [32]u8 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   let normalized std.path.normalize path_buf "src//./main.0/"
+  mut parent_buf [32]u8 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  let parent_normalized std.path.normalize parent_buf "src/a/../main.0"
+  mut join_buf [32]u8 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  let joined std.path.join join_buf "src/" "/main.0"
   mut rel_buf [32]u8 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   let relative std.path.relative rel_buf "src" "src/main.0"
+  mut fallback_buf [32]u8 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  let fallback_relative std.path.relative fallback_buf "other" "src/main.0"
+  mut small_buf [3]u8 [0, 0, 0]
+  let overflow std.path.normalize small_buf "abcd"
   mut copy_dst [4]u8 [0, 0, 0, 0]
   mut reader_buf [8]u8 [0, 0, 0, 0, 0, 0, 0, 0]
   mut writer_buf [8]u8 [0, 0, 0, 0, 0, 0, 0, 0]
   let reader std.io.bufferedReader reader_buf
   let writer std.io.bufferedWriter writer_buf
   let copied std.io.copy copy_dst (std.mem.span "abcd")
-  if && (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& normalized.has relative.has) (std.mem.eql normalized.value "src/main.0")) (std.mem.eql relative.value "main.0")) (std.mem.eql (std.path.basename "src/main.0") "main.0")) (std.mem.eql (std.path.dirname "src/main.0") "src")) (std.mem.eql (std.path.extension "src/main.0") "0")) (== (std.io.readerCapacity (&reader)) 8)) (== (std.io.writerCapacity (&writer)) 8)) (== copied 4)) (== copy_dst[0] 97_u8)) (== copy_dst[3] 100_u8)
+  mut ok Bool true
+  if == normalized.has false
+    set ok false
+  if normalized.has
+    if == (std.mem.eql normalized.value "src/main.0") false
+      set ok false
+  if == parent_normalized.has false
+    set ok false
+  if parent_normalized.has
+    if == (std.mem.eql parent_normalized.value "src/main.0") false
+      set ok false
+  if == joined.has false
+    set ok false
+  if joined.has
+    if == (std.mem.eql joined.value "src/main.0") false
+      set ok false
+  if == relative.has false
+    set ok false
+  if relative.has
+    if == (std.mem.eql relative.value "main.0") false
+      set ok false
+  if == fallback_relative.has false
+    set ok false
+  if fallback_relative.has
+    if == (std.mem.eql fallback_relative.value "src/main.0") false
+      set ok false
+  if overflow.has
+    set ok false
+  if == (std.mem.eql (std.path.basename "src/main.0") "main.0") false
+    set ok false
+  if == (std.mem.eql (std.path.dirname "src/main.0") "src") false
+    set ok false
+  if == (std.mem.eql (std.path.extension "src/main.0") "0") false
+    set ok false
+  if != (std.io.readerCapacity (&reader)) 8
+    set ok false
+  if != (std.io.writerCapacity (&writer)) 8
+    set ok false
+  if != copied 4
+    set ok false
+  if != copy_dst[0] 97_u8
+    set ok false
+  if != copy_dst[3] 100_u8
+    set ok false
+  if ok
     check world.out.write "std path io breadth ok\n"

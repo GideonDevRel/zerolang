@@ -171,8 +171,8 @@ async function assertElfAarch64Object(path, exportedName) {
   assert.equal(bytes[5], 1);
   assert.equal(bytes.readUInt16LE(16), 1);
   assert.equal(bytes.readUInt16LE(18), 183);
-  assert(bytes.includes(Buffer.from([0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6])));
   assert(bytes.includes(Buffer.concat([Buffer.from(exportedName), Buffer.from([0])])));
+  return bytes;
 }
 
 function hasAarch64Instruction(bytes, expected) {
@@ -357,7 +357,7 @@ for (const fixture of [
   "conformance/native/pass/generic-spans.0",
   "conformance/native/pass/open-ended-slices.0",
   "conformance/native/pass/string-slices.0",
-  "conformance/native/pass/coff-dynamic-byte-slice-blocked.0",
+  "conformance/native/pass/coff-dynamic-byte-slice.0",
   "conformance/native/pass/macho-large-byte-slice-blocked.0",
   "conformance/native/pass/macho-nested-call-scratch-blocked.0",
   "conformance/native/pass/macho-open-byte-slice-blocked.0",
@@ -845,7 +845,7 @@ const directStringCoffExeBody = JSON.parse(directStringCoffExe.stdout);
 assert.equal(directStringCoffExeBody.compiler, "zero-coff-x64");
 assert.equal(directStringCoffExeBody.generatedCBytes, 0);
 
-const coffDynamicSliceFixture = "conformance/native/pass/coff-dynamic-byte-slice-blocked.0";
+const coffDynamicSliceFixture = "conformance/native/pass/coff-dynamic-byte-slice.0";
 const coffDynamicSliceReadiness = await execFileAsync(zero, [
   "check",
   "--json",
@@ -858,12 +858,9 @@ const coffDynamicSliceReadiness = await execFileAsync(zero, [
 const coffDynamicSliceReadinessBody = JSON.parse(coffDynamicSliceReadiness.stdout);
 assert.equal(coffDynamicSliceReadinessBody.ok, true);
 assert.equal(coffDynamicSliceReadinessBody.diagnostics.length, 0);
-assert.equal(coffDynamicSliceReadinessBody.targetReadiness.ok, false);
-assert.equal(coffDynamicSliceReadinessBody.targetReadiness.buildable, false);
-assert.equal(coffDynamicSliceReadinessBody.targetReadiness.diagnostics[0].code, "BLD004");
-assert.equal(coffDynamicSliceReadinessBody.targetReadiness.diagnostics[0].backendBlocker.backend, "zero-coff-x64");
-assert.equal(coffDynamicSliceReadinessBody.targetReadiness.diagnostics[0].backendBlocker.stage, "buildability");
-assert.match(coffDynamicSliceReadinessBody.targetReadiness.diagnostics[0].message, /constant start/);
+assert.equal(coffDynamicSliceReadinessBody.targetReadiness.ok, true);
+assert.equal(coffDynamicSliceReadinessBody.targetReadiness.buildable, true);
+assert.equal(coffDynamicSliceReadinessBody.targetReadiness.backend, "zero-coff-x64");
 const coffDynamicSliceBuild = await execFileAsync(zero, [
   "build",
   "--json",
@@ -874,16 +871,12 @@ const coffDynamicSliceBuild = await execFileAsync(zero, [
   coffDynamicSliceFixture,
   "--out",
   `${outDir}/coff-dynamic-byte-slice.obj`,
-]).catch((error) => error);
-assert.notEqual(coffDynamicSliceBuild.code, 0);
+]);
 const coffDynamicSliceBuildBody = JSON.parse(coffDynamicSliceBuild.stdout);
-const coffDynamicSliceReadinessDiag = coffDynamicSliceReadinessBody.targetReadiness.diagnostics[0];
-const coffDynamicSliceBuildDiag = coffDynamicSliceBuildBody.diagnostics[0];
-for (const key of ["code", "path", "line", "column", "length", "expected", "actual", "help"]) {
-  assert.equal(coffDynamicSliceBuildDiag[key], coffDynamicSliceReadinessDiag[key]);
-}
-assert.equal(coffDynamicSliceBuildDiag.backendBlocker.backend, "zero-coff-x64");
-assert.equal(coffDynamicSliceBuildDiag.backendBlocker.stage, "buildability");
+assert.equal(coffDynamicSliceBuildBody.compiler, "zero-coff-x64");
+assert.equal(coffDynamicSliceBuildBody.generatedCBytes, 0);
+assert.equal(coffDynamicSliceBuildBody.objectBackend.objectEmission.path, "direct-coff-x64-object");
+await assertCoffX64Object(`${outDir}/coff-dynamic-byte-slice.obj`, "main");
 
 async function assertMachOObjectBuildabilityBlocked(fixture, outName, expectedMessage) {
   const readiness = await execFileAsync(zero, [
@@ -972,12 +965,9 @@ const directCallArm64ObjReadiness = await execFileAsync(zero, [
 const directCallArm64ObjReadinessBody = JSON.parse(directCallArm64ObjReadiness.stdout);
 assert.equal(directCallArm64ObjReadinessBody.ok, true);
 assert.equal(directCallArm64ObjReadinessBody.diagnostics.length, 0);
-assert.equal(directCallArm64ObjReadinessBody.targetReadiness.ok, false);
-assert.equal(directCallArm64ObjReadinessBody.targetReadiness.buildable, false);
-assert.equal(directCallArm64ObjReadinessBody.targetReadiness.diagnostics[0].code, "BLD004");
-assert.equal(directCallArm64ObjReadinessBody.targetReadiness.diagnostics[0].backendBlocker.backend, "zero-elf-aarch64");
-assert.equal(directCallArm64ObjReadinessBody.targetReadiness.diagnostics[0].backendBlocker.stage, "buildability");
-assert.match(directCallArm64ObjReadinessBody.targetReadiness.diagnostics[0].message, /without parameters|small integer literal/);
+assert.equal(directCallArm64ObjReadinessBody.targetReadiness.ok, true);
+assert.equal(directCallArm64ObjReadinessBody.targetReadiness.buildable, true);
+assert.equal(directCallArm64ObjReadinessBody.targetReadiness.backend, "zero-elf-aarch64");
 const directCallArm64ObjBuild = await execFileAsync(zero, [
   "build",
   "--json",
@@ -987,17 +977,13 @@ const directCallArm64ObjBuild = await execFileAsync(zero, [
   "linux-arm64",
   "examples/direct-call-add.0",
   "--out",
-  `${outDir}/direct-call-add-arm64-blocked.o`,
-]).catch((error) => error);
-assert.notEqual(directCallArm64ObjBuild.code, 0);
+  `${outDir}/direct-call-add-arm64.o`,
+]);
 const directCallArm64ObjBuildBody = JSON.parse(directCallArm64ObjBuild.stdout);
-const directCallArm64ObjReadinessDiag = directCallArm64ObjReadinessBody.targetReadiness.diagnostics[0];
-const directCallArm64ObjBuildDiag = directCallArm64ObjBuildBody.diagnostics[0];
-for (const key of ["code", "path", "line", "column", "length", "expected", "actual", "help"]) {
-  assert.equal(directCallArm64ObjBuildDiag[key], directCallArm64ObjReadinessDiag[key]);
-}
-assert.equal(directCallArm64ObjBuildDiag.backendBlocker.backend, "zero-elf-aarch64");
-assert.equal(directCallArm64ObjBuildDiag.backendBlocker.stage, "buildability");
+assert.equal(directCallArm64ObjBuildBody.compiler, "zero-elf-aarch64");
+assert.equal(directCallArm64ObjBuildBody.generatedCBytes, 0);
+assert.equal(directCallArm64ObjBuildBody.objectBackend.objectEmission.path, "direct-elf-aarch64-object");
+await assertElfAarch64Object(`${outDir}/direct-call-add-arm64.o`, "main");
 
 let arm64NestedIndexExpr = "values[idx]";
 for (let i = 0; i < 32; i++) arm64NestedIndexExpr = `(+ 0_u32 ${arm64NestedIndexExpr})`;
@@ -1113,7 +1099,8 @@ await execFileAsync(zero, [
   "--out",
   arm64PrivateHelperObj,
 ]);
-await assertElfAarch64Object(arm64PrivateHelperObj, "main");
+const arm64PrivateHelperBytes = await assertElfAarch64Object(arm64PrivateHelperObj, "main");
+assert(arm64PrivateHelperBytes.includes(Buffer.from([0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6])));
 
 const arm64CompareSource = `${outDir}/aarch64-typed-compare.0`;
 const arm64CompareObj = `${outDir}/aarch64-typed-compare.o`;

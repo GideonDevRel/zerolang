@@ -5091,6 +5091,26 @@ static bool type_core_apply_args_compatible(const Program *program, Scope *scope
   return true;
 }
 
+static bool type_core_is_u8(const ZTypeArena *arena, ZTypeId type) {
+  return z_type_kind(arena, type) == Z_TYPE_NODE_NAME && strcmp(z_type_name(arena, type) ? z_type_name(arena, type) : "", "u8") == 0;
+}
+
+static bool type_core_is_string(const ZTypeArena *arena, ZTypeId type) {
+  return z_type_kind(arena, type) == Z_TYPE_NODE_NAME && strcmp(z_type_name(arena, type) ? z_type_name(arena, type) : "", "String") == 0;
+}
+
+static bool type_core_is_byte_apply(const ZTypeArena *arena, ZTypeId type, const char *name) {
+  if (!type_core_apply_is(arena, type, name)) return false;
+  ZTypeId inner = type_core_single_type_arg(arena, type);
+  return inner != Z_TYPE_ID_INVALID && type_core_is_u8(arena, inner);
+}
+
+static bool type_core_readable_byte_span_like(const ZTypeArena *arena, ZTypeId type) {
+  return type_core_is_string(arena, type) ||
+         type_core_is_byte_apply(arena, type, "Span") ||
+         type_core_is_byte_apply(arena, type, "MutSpan");
+}
+
 static bool type_core_types_compatible_inner(const Program *program, Scope *scope, ZTypeArena *arena, ZTypeId expected, ZTypeId actual, size_t depth) {
   if (depth > 64) return false;
   if (z_type_equal(arena, expected, actual)) return true;
@@ -5104,6 +5124,17 @@ static bool type_core_types_compatible_inner(const Program *program, Scope *scop
     return type_core_types_compatible_inner(program, scope, arena, z_type_const_inner(arena, expected), actual_inner, depth + 1);
   }
   if (actual_kind == Z_TYPE_NODE_CONST) return false;
+
+  if (type_core_is_byte_apply(arena, expected, "MutSpan")) return type_core_is_byte_apply(arena, actual, "MutSpan");
+  if ((type_core_is_string(arena, expected) || type_core_is_byte_apply(arena, expected, "Span")) &&
+      type_core_readable_byte_span_like(arena, actual)) return true;
+
+  if (expected_kind == Z_TYPE_NODE_APPLY && type_core_apply_is(arena, expected, "Maybe") &&
+      !type_core_apply_is(arena, actual, "Maybe")) {
+    ZTypeId expected_inner = type_core_single_type_arg(arena, expected);
+    return expected_inner != Z_TYPE_ID_INVALID &&
+           type_core_types_compatible_inner(program, scope, arena, expected_inner, actual, depth + 1);
+  }
 
   if (expected_kind == Z_TYPE_NODE_APPLY && type_core_apply_is(arena, expected, "owned")) {
     ZTypeId expected_inner = type_core_single_type_arg(arena, expected);

@@ -452,6 +452,11 @@ static bool elf_emit_byte_view_len(ZBuf *code, const IrFunction *fun, const IrVa
     elf_emit_load_local_slot_reg(code, &fun->locals[view->local_index], 16, 0, false);
     return true;
   }
+  if (view && view->kind == IR_VALUE_CALL && view->type == IR_TYPE_BYTE_VIEW) {
+    if (!elf_emit_value(code, fun, view, ctx, diag)) return false;
+    z_x64_emit_mov_reg_from_reg(code, 0, 2, true);
+    return true;
+  }
   (void)ctx;
   return elf_diag(diag, "direct ELF64 byte-view length currently requires a literal, constant slice, fixed byte array, or byte-view local", view ? view->line : 1, view ? view->column : 1, "unsupported byte view length");
 }
@@ -486,6 +491,9 @@ static bool elf_emit_byte_view_ptr(ZBuf *code, const IrFunction *fun, const IrVa
     z_x64_emit_pop_reg64(code, 1);
     z_x64_emit_add_rax_rcx(code, true);
     return true;
+  }
+  if (view->kind == IR_VALUE_CALL && view->type == IR_TYPE_BYTE_VIEW) {
+    return elf_emit_value(code, fun, view, ctx, diag);
   }
   return elf_diag(diag, "direct ELF64 value is not a supported byte view", view->line, view->column, "unsupported byte view");
 }
@@ -1225,6 +1233,8 @@ static bool elf_emit_byte_index_value(ZBuf *code, const IrFunction *fun, const I
 static bool elf_emit_value(ZBuf *code, const IrFunction *fun, const IrValue *value, ElfEmitContext *ctx, ZDiag *diag) {
   if (!value) return elf_diag(diag, "direct ELF64 expression is missing", 1, 1, "missing expression");
   if (!elf_type_is_supported_scalar(value->type) && !((value->kind == IR_VALUE_CALL || value->kind == IR_VALUE_CHECK) && value->type == IR_TYPE_VOID) &&
+      !((value->kind == IR_VALUE_CALL || value->kind == IR_VALUE_MAYBE_BYTE_VIEW_LITERAL) &&
+        (value->type == IR_TYPE_BYTE_VIEW || value->type == IR_TYPE_MAYBE_BYTE_VIEW)) &&
       value->kind != IR_VALUE_MAYBE_HAS && value->kind != IR_VALUE_VEC_LEN && value->kind != IR_VALUE_VEC_CAPACITY &&
       value->kind != IR_VALUE_VEC_PUSH && value->kind != IR_VALUE_ARGS_LEN &&
       value->type != IR_TYPE_MAYBE_SCALAR && value->kind != IR_VALUE_FS_CLOSE_FILE) {
@@ -1271,8 +1281,9 @@ static bool elf_validate_function(const IrFunction *fun, ZDiag *diag) {
   size_t abi_slots = 0;
   for (size_t i = 0; i < fun->param_count; i++) abi_slots += fun->locals[i].type == IR_TYPE_BYTE_VIEW ? 2 : 1;
   if (abi_slots > 6) return elf_diag(diag, "direct ELF64 object backend supports at most six ABI argument slots", fun->line, fun->column, fun->name);
-  if (fun->return_type != IR_TYPE_VOID && !elf_type_is_supported_scalar(fun->return_type)) {
-    return elf_diag(diag, "direct ELF64 object backend currently supports only Void and primitive integer returns", fun->line, fun->column, elf_type_name(fun->return_type));
+  if (fun->return_type != IR_TYPE_VOID && !elf_type_is_supported_scalar(fun->return_type) &&
+      fun->return_type != IR_TYPE_BYTE_VIEW && fun->return_type != IR_TYPE_MAYBE_BYTE_VIEW) {
+    return elf_diag(diag, "direct ELF64 object backend currently supports Void, primitive integer, byte-view, and Maybe byte-view returns", fun->line, fun->column, elf_type_name(fun->return_type));
   }
   for (size_t i = 0; i < fun->local_len; i++) {
     if (fun->locals[i].is_array) {
@@ -1505,6 +1516,12 @@ static bool elf_emit_read_all_or_raise_to_local(ZBuf *text, const IrFunction *fu
 
 static bool elf_emit_byte_view_local_set(ZBuf *text, const IrFunction *fun, const IrInstr *instr, const IrLocal *local, ElfEmitContext *ctx, ZDiag *diag) {
   if (instr->value && instr->value->kind == IR_VALUE_CHECK && instr->value->left && instr->value->left->kind == IR_VALUE_FS_READ_ALL) return elf_emit_read_all_or_raise_to_local(text, fun, instr, ctx, diag);
+  if (instr->value && instr->value->kind == IR_VALUE_CALL && instr->value->type == IR_TYPE_BYTE_VIEW) {
+    if (!elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
+    elf_emit_store_local_slot_reg(text, local, 0, 0, true);
+    elf_emit_store_local_slot_reg(text, local, 8, 2, true);
+    return true;
+  }
   if (!elf_emit_byte_view_ptr(text, fun, instr->value, ctx, diag)) return false;
   elf_emit_store_local_slot_rax(text, local, 0);
   if (!elf_emit_byte_view_len(text, fun, instr->value, ctx, diag)) return false;
@@ -1623,6 +1640,28 @@ static bool elf_emit_alloc_bytes_to_local(ZBuf *text, const IrFunction *fun, con
 }
 
 static bool elf_emit_maybe_byte_view_local_set(ZBuf *text, const IrFunction *fun, const IrInstr *instr, const IrLocal *local, ElfEmitContext *ctx, ZDiag *diag) {
+  if (instr->value && instr->value->kind == IR_VALUE_MAYBE_BYTE_VIEW_LITERAL) {
+    z_x64_emit_mov_eax_u32(text, instr->value->data_len ? 1u : 0u);
+    elf_emit_store_local_slot_reg(text, local, 0, 0, false);
+    if (!instr->value->data_len) {
+      z_x64_emit_xor_eax_eax(text);
+      elf_emit_store_local_slot_reg(text, local, 8, 0, true);
+      elf_emit_store_local_slot_reg(text, local, 16, 0, false);
+      return true;
+    }
+    if (!elf_emit_byte_view_ptr(text, fun, instr->value->left, ctx, diag)) return false;
+    elf_emit_store_local_slot_reg(text, local, 8, 0, true);
+    if (!elf_emit_byte_view_len(text, fun, instr->value->left, ctx, diag)) return false;
+    elf_emit_store_local_slot_reg(text, local, 16, 0, false);
+    return true;
+  }
+  if (instr->value && instr->value->kind == IR_VALUE_CALL && instr->value->type == IR_TYPE_MAYBE_BYTE_VIEW) {
+    if (!elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
+    elf_emit_store_local_slot_reg(text, local, 0, 0, false);
+    elf_emit_store_local_slot_reg(text, local, 8, 2, true);
+    elf_emit_store_local_slot_reg(text, local, 16, 1, false);
+    return true;
+  }
   if (instr->value && instr->value->kind == IR_VALUE_FS_TEMP_NAME) return elf_emit_temp_name_to_local(text, fun, instr, local, ctx, diag);
   if (instr->value && instr->value->kind == IR_VALUE_ARGS_GET) return elf_emit_args_get_to_local(text, fun, instr->value, local, ctx, diag);
   if (instr->value && instr->value->kind == IR_VALUE_ENV_GET) return elf_emit_env_get_to_local(text, fun, instr->value, local, ctx, diag);
@@ -1685,10 +1724,34 @@ static bool elf_emit_local_set_instr(ZBuf *text, const IrFunction *fun, const Ir
   return true;
 }
 
+static bool elf_emit_byte_view_index_store(ZBuf *text, const IrFunction *fun, const IrInstr *instr, const IrLocal *local, ElfEmitContext *ctx, ZDiag *diag) {
+  if (!instr->value || instr->value->type != IR_TYPE_U8) return elf_diag(diag, "direct ELF64 byte-view indexed store requires u8 value", instr->line, instr->column, "unsupported byte-view store value");
+  if (!elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
+  z_x64_emit_push_rax(text);
+  if (!instr->index || !elf_emit_value(text, fun, instr->index, ctx, diag)) return false;
+  z_x64_emit_push_rax(text);
+  elf_emit_load_local_slot_reg(text, local, 8, 0, false);
+  z_x64_emit_mov_rcx_from_rax(text, false);
+  z_x64_emit_pop_rax(text);
+  z_x64_emit_cmp_rax_rcx(text, false);
+  size_t ok_patch = z_x64_emit_jcc32_placeholder(text, 0x82);
+  z_x64_emit_ud2(text);
+  z_x64_patch_rel32(text, ok_patch, text->len);
+  z_x64_emit_push_rax(text);
+  elf_emit_load_local_slot_rax(text, local, 0);
+  z_x64_emit_pop_reg64(text, 1);
+  z_x64_emit_add_rax_rcx(text, true);
+  z_x64_emit_mov_reg_from_reg(text, 2, 0, true);
+  z_x64_emit_pop_reg64(text, 0);
+  z_x64_emit_store_ptr_reg8_from_reg(text, 2, 0);
+  return true;
+}
+
 static bool elf_emit_store_instr(ZBuf *text, const IrFunction *fun, const IrInstr *instr, ElfEmitContext *ctx, ZDiag *diag) {
   if (instr->kind == IR_INSTR_INDEX_STORE) {
     if (instr->array_index >= fun->local_len) return elf_diag(diag, "direct ELF64 indexed store array is out of range", instr->line, instr->column, "invalid array local");
     const IrLocal *local = &fun->locals[instr->array_index];
+    if (local->type == IR_TYPE_BYTE_VIEW) return elf_emit_byte_view_index_store(text, fun, instr, local, ctx, diag);
     if (!elf_emit_bounds_checked_address(text, fun, local, instr->index, ctx, diag)) return false;
     z_x64_emit_push_rax(text);
     if (!elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
@@ -1717,6 +1780,41 @@ static bool elf_emit_terminal_instr(ZBuf *text, const IrFunction *fun, const IrI
       elf_emit_epilogue(text, fun, ctx);
       return true;
     case IR_INSTR_RETURN:
+      if (fun->return_type == IR_TYPE_BYTE_VIEW && instr->value) {
+        if (instr->value->kind == IR_VALUE_CALL && instr->value->type == IR_TYPE_BYTE_VIEW) {
+          if (!elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
+        } else {
+          if (!elf_emit_byte_view_ptr(text, fun, instr->value, ctx, diag)) return false;
+          z_x64_emit_push_rax(text);
+          if (!elf_emit_byte_view_len(text, fun, instr->value, ctx, diag)) return false;
+          z_x64_emit_mov_rdx_from_rax(text);
+          z_x64_emit_pop_rax(text);
+        }
+        elf_emit_epilogue(text, fun, ctx);
+        return true;
+      }
+      if (fun->return_type == IR_TYPE_MAYBE_BYTE_VIEW && instr->value) {
+        if (instr->value->kind == IR_VALUE_CALL && instr->value->type == IR_TYPE_MAYBE_BYTE_VIEW) {
+          if (!elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
+        } else if (instr->value->kind == IR_VALUE_MAYBE_BYTE_VIEW_LITERAL) {
+          if (!instr->value->data_len) {
+            z_x64_emit_xor_eax_eax(text);
+            z_x64_emit_xor_reg_reg(text, 2, true);
+            z_x64_emit_xor_ecx_ecx(text);
+          } else {
+            if (!elf_emit_byte_view_ptr(text, fun, instr->value->left, ctx, diag)) return false;
+            z_x64_emit_push_rax(text);
+            if (!elf_emit_byte_view_len(text, fun, instr->value->left, ctx, diag)) return false;
+            z_x64_emit_mov_rcx_from_rax(text, false);
+            z_x64_emit_pop_reg64(text, 2);
+            z_x64_emit_mov_eax_u32(text, 1);
+          }
+        } else {
+          return elf_diag(diag, "direct ELF64 Maybe byte-view return requires a Maybe byte-view value", instr->line, instr->column, "unsupported Maybe byte-view return");
+        }
+        elf_emit_epilogue(text, fun, ctx);
+        return true;
+      }
       if (instr->value && !elf_emit_value(text, fun, instr->value, ctx, diag)) return false;
       if (fun->raises && !instr->value) z_x64_emit_xor_rax_rax(text);
       else if (fun->raises && instr->value && !elf_type_is_i64(instr->value->type)) z_x64_emit_mov_reg_from_reg(text, 0, 0, false);

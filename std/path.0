@@ -1,0 +1,144 @@
+fn zeroStdPathIsSep Bool byte u8
+  ret || (== byte 47_u8) (== byte 92_u8)
+
+fn zeroStdPathSegmentEnd Bool path String index usize
+  ret || (>= index (std.mem.len path)) (zeroStdPathIsSep path[index])
+
+fn zeroStdPathTrimEnd usize path String
+  mut end usize std.mem.len path
+  while && (> end 0) (zeroStdPathIsSep path[(- end 1)])
+    set end - end 1
+  ret end
+
+fn zeroStdPathBasename String path String
+  let end usize zeroStdPathTrimEnd path
+  mut start usize end
+  while && (> start 0) (== (zeroStdPathIsSep path[(- start 1)]) false)
+    set start - start 1
+  ret path[start..end]
+
+fn zeroStdPathDirname String path String
+  let end usize zeroStdPathTrimEnd path
+  mut split usize end
+  while && (> split 0) (== (zeroStdPathIsSep path[(- split 1)]) false)
+    set split - split 1
+  while && (> split 0) (zeroStdPathIsSep path[(- split 1)])
+    set split - split 1
+  ret path[..split]
+
+fn zeroStdPathExtension String path String
+  let end usize zeroStdPathTrimEnd path
+  mut start usize end
+  while && (> start 0) (== (zeroStdPathIsSep path[(- start 1)]) false)
+    set start - start 1
+  mut dot usize end
+  mut scan usize end
+  while > scan start
+    set scan - scan 1
+    if == path[scan] 46_u8
+      set dot scan
+      set scan start
+  if == dot end
+    ret path[end..end]
+  if == dot start
+    ret path[end..end]
+  ret path[(+ dot 1)..end]
+
+fn zeroStdPathCopy Maybe<String> buffer MutSpan<u8> source String
+  let len usize std.mem.len source
+  if > len (std.mem.len buffer)
+    ret null
+  mut index usize 0
+  while < index len
+    set buffer[index] source[index]
+    set index + index 1
+  ret buffer[..len]
+
+fn zeroStdPathJoin Maybe<String> buffer MutSpan<u8> left String right String
+  let left_end usize zeroStdPathTrimEnd left
+  mut right_start usize 0
+  while && (< right_start (std.mem.len right)) (zeroStdPathIsSep right[right_start])
+    set right_start + right_start 1
+  let right_len usize - (std.mem.len right) right_start
+  mut total usize + left_end right_len
+  if && (> left_end 0) (> right_len 0)
+    set total + total 1
+  if > total (std.mem.len buffer)
+    ret null
+  mut out usize 0
+  while < out left_end
+    set buffer[out] left[out]
+    set out + out 1
+  if && (> left_end 0) (> right_len 0)
+    set buffer[out] 47_u8
+    set out + out 1
+  mut read usize right_start
+  while < read (std.mem.len right)
+    set buffer[out] right[read]
+    set out + out 1
+    set read + read 1
+  ret buffer[..out]
+
+fn zeroStdPathNormalize Maybe<String> buffer MutSpan<u8> path String
+  mut read usize 0
+  mut out usize 0
+  mut wrote_sep Bool false
+  while < read (std.mem.len path)
+    let byte u8 path[read]
+    if zeroStdPathIsSep byte
+      if && (> out 0) (== wrote_sep false)
+        if >= out (std.mem.len buffer)
+          ret null
+        set buffer[out] 47_u8
+        set out + out 1
+        set wrote_sep true
+      set read + read 1
+    else
+      if && (== byte 46_u8) (zeroStdPathSegmentEnd path (+ read 1))
+        set read + read 1
+      else
+        if && (&& (== byte 46_u8) (< (+ read 1) (std.mem.len path))) (&& (== path[(+ read 1)] 46_u8) (zeroStdPathSegmentEnd path (+ read 2)))
+          while && (> out 0) (== buffer[(- out 1)] 47_u8)
+            set out - out 1
+          while && (> out 0) (== (zeroStdPathIsSep buffer[(- out 1)]) false)
+            set out - out 1
+          set read + read 2
+          set wrote_sep > out 0
+        else
+          if >= out (std.mem.len buffer)
+            ret null
+          set buffer[out] byte
+          set out + out 1
+          set wrote_sep false
+          set read + read 1
+  while && (> out 1) (== buffer[(- out 1)] 47_u8)
+    set out - out 1
+  ret buffer[..out]
+
+fn zeroStdPathRelative Maybe<String> buffer MutSpan<u8> base String target String
+  let base_end usize zeroStdPathTrimEnd base
+  let target_len usize std.mem.len target
+  mut index usize 0
+  mut same Bool true
+  if > base_end target_len
+    set same false
+  while && same (< index base_end)
+    if != base[index] target[index]
+      set same false
+    else
+      set index + index 1
+  if && same (== base_end target_len)
+    ret buffer[..0]
+  if && same (< base_end target_len)
+    if zeroStdPathIsSep target[base_end]
+      mut out usize 0
+      mut read usize + base_end 1
+      let rel_len usize - target_len read
+      if > rel_len (std.mem.len buffer)
+        ret null
+      while < read target_len
+        set buffer[out] target[read]
+        set out + out 1
+        set read + read 1
+      ret buffer[..out]
+  ret zeroStdPathCopy buffer target

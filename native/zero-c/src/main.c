@@ -5,6 +5,7 @@
 #include "zero.h"
 #include "buildability.h"
 #include "std_sig.h"
+#include "std_source.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -3864,6 +3865,39 @@ static void direct_row_append_source(SourceInput *input, ZBuf *combined, const c
   direct_input_push_source_line(input, path, original_line);
 }
 
+static bool direct_row_append_std_source(SourceInput *input, ZBuf *combined, const ZStdSourceModule *module, ZDiag *diag) {
+  if (!module) return true;
+  if (direct_input_has_file(input, module->path)) return true;
+  char *source = z_std_source_module_copy_source(module);
+  ZRowTokenVec tokens = z_row_tokenize(source, diag);
+  ZRowTree tree = {0};
+  if (diag->code == 0) z_row_parse_layout(&tokens, &tree, diag);
+  if (diag->code != 0) {
+    if (!diag->path) diag->path = z_strdup(module->path);
+    z_free_row_tree(&tree);
+    z_free_row_tokens(&tokens);
+    free(source);
+    return false;
+  }
+  direct_input_push_string(&input->source_files, &input->source_file_count, module->path);
+  direct_input_push_module(input, module->module, module->path);
+  bool ok = direct_input_add_row_symbols(input, &tokens, &tree, module->module, diag);
+  if (ok) direct_row_append_source(input, combined, module->path, source);
+  z_free_row_tree(&tree);
+  z_free_row_tokens(&tokens);
+  free(source);
+  return ok && (!diag || diag->code == 0);
+}
+
+static bool direct_row_references_std_module(const ZRowTokenVec *tokens, const char *name) {
+  for (size_t i = 0; tokens && name && i + 2 < tokens->len; i++) {
+    if (!direct_row_token_text(tokens, i, "std")) continue;
+    if (!direct_row_token_text(tokens, i + 1, ".")) continue;
+    if (direct_row_token_text(tokens, i + 2, name)) return true;
+  }
+  return false;
+}
+
 static bool direct_row_resolve_file(const char *path, const char *root, SourceInput *input, ZBuf *combined, ZDiag *diag, char ***stack, size_t *stack_len) {
   if (direct_input_has_file(input, path)) return true;
   if (direct_row_stack_contains(*stack, *stack_len, path)) {
@@ -3888,6 +3922,12 @@ static bool direct_row_resolve_file(const char *path, const char *root, SourceIn
     free(module);
     free(source);
     return false;
+  }
+
+  if (direct_row_references_std_module(&tokens, "path")) {
+    if (!direct_row_append_std_source(input, combined, z_std_source_module_for_name("std.path"), diag)) {
+      if (!diag->path) diag->path = z_strdup(path);
+    }
   }
 
   for (size_t i = 0; i < tree.len && diag->code == 0; i++) {
